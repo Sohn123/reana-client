@@ -10,6 +10,7 @@
 import base64
 import hashlib
 import json
+import os
 import secrets
 import time
 import webbrowser
@@ -46,6 +47,20 @@ timeout on the refresh request itself, so a legitimate in-flight refresh
 almost always finishes (or fails) before this deadline."""
 
 LOOPBACK_HOST = "127.0.0.1"
+LOOPBACK_PORT_ENV = "REANA_CLIENT_LOGIN_LOOPBACK_PORT"
+"""Overrides the loopback callback server's port; unset means OS-assigned.
+
+RFC 8252 native-app guidance calls for binding an OS-assigned ephemeral port
+(0) so the authorization server is expected to match the redirect URI on
+scheme/host only. Not every identity provider supports that, though --
+CERN's Application Portal, for one, has no documented way to register a
+wildcard/any-port loopback redirect URI and requires an exact match. Setting
+this env var pins one fixed port so an administrator can register
+`http://127.0.0.1:<port>/callback` once. The trade-off: login fails outright
+if something else on the machine is already bound to that port, instead of
+the ephemeral default's automatic use of a fresh free port every time --
+which is why it stays opt-in rather than the default.
+"""
 LOOPBACK_CALLBACK_PATH = "/callback"
 LOOPBACK_TIMEOUT_SECONDS = 300
 
@@ -347,7 +362,36 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
 def _start_callback_server() -> Tuple[HTTPServer, str]:
     """Start a loopback HTTP server and return it with its redirect URI."""
-    httpd = HTTPServer((LOOPBACK_HOST, 0), _CallbackHandler)
+    raw_port = os.getenv(LOOPBACK_PORT_ENV, "0")
+    try:
+        requested_port = int(raw_port)
+    except ValueError:
+        raise AuthenticationError(
+            f"{LOOPBACK_PORT_ENV} must be an integer port number, " f"got '{raw_port}'."
+        )
+    if not 0 <= requested_port <= 65535:
+        # A port outside 0-65535 reaches HTTPServer's bind() and raises
+        # OverflowError there, which is not an OSError subclass and so
+        # would otherwise skip the controlled handling below entirely.
+        raise AuthenticationError(
+            f"{LOOPBACK_PORT_ENV} must be between 0 and 65535, "
+            f"got {requested_port}."
+        )
+    try:
+        httpd = HTTPServer((LOOPBACK_HOST, requested_port), _CallbackHandler)
+    except OSError as error:
+        message = (
+            f"Could not bind the login callback server to "
+            f"{LOOPBACK_HOST}:{requested_port} ({error})."
+        )
+        if requested_port:
+            message += (
+                f" This port is fixed by {LOOPBACK_PORT_ENV} so it can be "
+                "registered as a redirect URI with the identity provider; "
+                "free it up (check what else is listening on it) and try "
+                "again."
+            )
+        raise AuthenticationError(message)
     httpd.callback_query = None
     port = httpd.server_address[1]
     redirect_uri = f"http://{LOOPBACK_HOST}:{port}{LOOPBACK_CALLBACK_PATH}"

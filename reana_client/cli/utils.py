@@ -25,6 +25,7 @@ from click.core import ParameterSource
 from reana_commons.utils import click_table_printer
 
 from reana_client.auth.oidc import AuthenticationError, get_access_token
+from reana_client.auth.storage import CredentialStoreError
 from reana_client.config import (
     ERROR_MESSAGES,
     RUN_STATUSES,
@@ -121,7 +122,7 @@ def access_token_check(
         return access_token
     try:
         return get_access_token()
-    except (AuthenticationError, ValueError) as exc:
+    except (AuthenticationError, CredentialStoreError, ValueError) as exc:
         if not required:
             return None
         display_message(

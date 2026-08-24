@@ -58,6 +58,10 @@ user-facing failure instead of hanging every credential operation forever."""
 CREDENTIAL_LOCK_POLL_INTERVAL_SECONDS = 0.1
 
 
+class CredentialStoreError(Exception):
+    """Credential persistence failure suitable for presentation by the CLI."""
+
+
 def _acquire_file_lock(
     lock_file, timeout: float = CREDENTIAL_LOCK_TIMEOUT_SECONDS
 ) -> None:
@@ -73,7 +77,7 @@ def _acquire_file_lock(
       ``msvcrt.locking`` and proceeding as if the lock had been taken,
       giving Windows no real mutual exclusion at all when contended.
 
-    Raises :class:`TimeoutError` if the lock is still held after ``timeout``
+    Raises :class:`CredentialStoreError` if the lock is still held after ``timeout``
     seconds, on both platforms. When neither locking primitive is available
     on this platform, this is a no-op (as before): the in-process reentrancy
     guard in :func:`credential_store_lock` and atomic file replacement in
@@ -85,7 +89,7 @@ def _acquire_file_lock(
     warned = False
     while not _try_acquire_file_lock_nb(lock_file):
         if time.monotonic() >= deadline:
-            raise TimeoutError(
+            raise CredentialStoreError(
                 "Timed out after {:.0f}s waiting for the REANA client "
                 "credential lock. Another reana-client process may be stuck "
                 "holding it.".format(timeout)

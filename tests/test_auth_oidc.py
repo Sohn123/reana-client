@@ -875,6 +875,65 @@ def test_loopback_callback_ignores_a_bare_request_and_waits_for_the_real_one():
         httpd.server_close()
 
 
+def test_start_callback_server_uses_pinned_port_when_set(monkeypatch):
+    """REANA_CLIENT_LOGIN_LOOPBACK_PORT pins the redirect URI's port.
+
+    Some identity providers (e.g. CERN's Application Portal) have no
+    documented way to register a wildcard/any-port loopback redirect URI and
+    require an exact match; this env var lets an operator register one fixed
+    port instead of relying on the RFC 8252 ephemeral-port default.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((oidc.LOOPBACK_HOST, 0))
+        free_port = probe.getsockname()[1]
+
+    monkeypatch.setenv(oidc.LOOPBACK_PORT_ENV, str(free_port))
+    httpd, redirect_uri = oidc._start_callback_server()
+    try:
+        assert redirect_uri == (
+            f"http://{oidc.LOOPBACK_HOST}:{free_port}{oidc.LOOPBACK_CALLBACK_PATH}"
+        )
+    finally:
+        httpd.server_close()
+
+
+def test_start_callback_server_reports_pinned_port_conflict(monkeypatch):
+    """A bind failure on a pinned port names the env var in the error."""
+    import socket
+
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind((oidc.LOOPBACK_HOST, 0))
+    blocker.listen(1)
+    taken_port = blocker.getsockname()[1]
+    try:
+        monkeypatch.setenv(oidc.LOOPBACK_PORT_ENV, str(taken_port))
+        with pytest.raises(oidc.AuthenticationError, match=oidc.LOOPBACK_PORT_ENV):
+            oidc._start_callback_server()
+    finally:
+        blocker.close()
+
+
+def test_start_callback_server_rejects_a_non_integer_pinned_port(monkeypatch):
+    """A non-numeric pinned port must fail cleanly, not with a raw ValueError."""
+    monkeypatch.setenv(oidc.LOOPBACK_PORT_ENV, "not-a-port")
+    with pytest.raises(oidc.AuthenticationError, match=oidc.LOOPBACK_PORT_ENV):
+        oidc._start_callback_server()
+
+
+def test_start_callback_server_rejects_an_out_of_range_pinned_port(monkeypatch):
+    """An out-of-range pinned port must fail cleanly, not with a raw OverflowError.
+
+    HTTPServer's own bind() raises OverflowError for a port outside
+    0-65535, which is not an OSError subclass and so would otherwise skip
+    the controlled AuthenticationError handling entirely.
+    """
+    monkeypatch.setenv(oidc.LOOPBACK_PORT_ENV, "70000")
+    with pytest.raises(oidc.AuthenticationError, match=oidc.LOOPBACK_PORT_ENV):
+        oidc._start_callback_server()
+
+
 def test_login_with_loopback_exchanges_code_with_pkce(tmp_path, monkeypatch):
     """Test the browser loopback flow exchanges the code using the verifier."""
     config_path = tmp_path / "reana-client.json"
@@ -1157,7 +1216,7 @@ def test_acquire_file_lock_times_out_instead_of_blocking_forever(tmp_path, caplo
     try:
         start = time.monotonic()
         with caplog.at_level(logging.WARNING, logger="reana_client.auth.storage"):
-            with pytest.raises(TimeoutError, match="credential lock"):
+            with pytest.raises(storage.CredentialStoreError, match="credential lock"):
                 storage._acquire_file_lock(contender, timeout=0.3)
         elapsed = time.monotonic() - start
 

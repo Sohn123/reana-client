@@ -13,6 +13,7 @@ from mock import Mock, patch
 from reana_commons.testing import make_mock_api_client
 
 from reana_client.cli import cli
+from reana_client.auth.storage import CredentialStoreError
 from reana_client.config import ERROR_MESSAGES
 
 
@@ -81,3 +82,32 @@ def test_ping_ok():
             assert message in result.output
             message = "Connected"
             assert message in result.output
+
+
+def test_login_reports_credential_lock_timeout(monkeypatch):
+    """A wedged credential writer becomes a concise CLI error, not a traceback."""
+    monkeypatch.setattr(
+        "reana_client.cli.ping._browser_login",
+        Mock(side_effect=CredentialStoreError("credential lock timed out")),
+    )
+    result = CliRunner().invoke(
+        cli, ["login", "--server-url", "https://reana.example.org"]
+    )
+    assert result.exit_code == 1
+    assert "credential lock timed out" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_logout_reports_credential_lock_timeout(monkeypatch):
+    """Logout handles the same storage boundary consistently."""
+    monkeypatch.setattr(
+        "reana_client.cli.ping.get_active_server",
+        Mock(return_value="https://reana.example.org"),
+    )
+    monkeypatch.setattr(
+        "reana_client.cli.ping.oidc_logout",
+        Mock(side_effect=CredentialStoreError("credential lock timed out")),
+    )
+    result = CliRunner().invoke(cli, ["logout"])
+    assert result.exit_code == 1
+    assert "credential lock timed out" in result.output

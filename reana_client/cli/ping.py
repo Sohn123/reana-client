@@ -19,6 +19,7 @@ from reana_client.auth.oidc import (
     login_with_loopback,
     logout as oidc_logout,
 )
+from reana_client.auth.storage import CredentialStoreError
 from reana_client.auth.storage import get_active_server, normalize_server_url
 from reana_client.cli.utils import add_access_token_options, check_connection
 from reana_client.config import JSON
@@ -65,7 +66,7 @@ def login(ctx, server_url, headless):  # noqa: D301
         else:
             _browser_login(server_url)
         display_message(f"Logged in to {server_url}")
-    except (AuthenticationError, ValueError) as e:
+    except (AuthenticationError, CredentialStoreError, ValueError) as e:
         display_message(str(e), msg_type="error")
         ctx.exit(1)
 
@@ -112,7 +113,7 @@ def logout(ctx):  # noqa: D301
         if warning:
             display_message(warning, msg_type="warning")
         display_message(f"Logged out from {server_url}")
-    except (AuthenticationError, ValueError) as e:
+    except (AuthenticationError, CredentialStoreError, ValueError) as e:
         display_message(str(e), msg_type="error")
         ctx.exit(1)
 
