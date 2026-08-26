@@ -102,12 +102,20 @@ CI/automation is to reuse credentials obtained once interactively:
 
 2. Store the resulting `reana-client.json` file's contents as a CI secret (e.g.
    a masked/protected variable), not in the repository.
-3. In the CI job, write that secret out to a file and point
-   `REANA_CLIENT_CONFIG` at it before running `reana-client`:
+3. In the CI job, write that secret out to a private, uniquely-named file and
+   point `REANA_CLIENT_CONFIG` at it before running `reana-client`. Plain shell
+   redirection (`echo ... > /tmp/reana-client.json`) creates the file
+   world-readable by default (mode `0666` minus umask) at a predictable path,
+   exposing the refresh token to other users on a shared runner until
+   `reana-client` itself happens to rewrite it; create it locked down from the
+   start instead, and clean it up afterwards:
 
    ```console
-   $ echo "$REANA_CREDENTIALS_SECRET" > /tmp/reana-client.json
-   $ export REANA_CLIENT_CONFIG=/tmp/reana-client.json
+   $ credential_file="$(mktemp)"
+   $ trap 'rm -f "$credential_file"' EXIT
+   $ chmod 600 "$credential_file"
+   $ printf '%s' "$REANA_CREDENTIALS_SECRET" > "$credential_file"
+   $ export REANA_CLIENT_CONFIG="$credential_file"
    $ reana-client ping
    ```
 
@@ -118,6 +126,19 @@ need the credential file refreshed with a new interactive login (repeat step 1)
 releases accepted a static, non-expiring `REANA_ACCESS_TOKEN`; that pattern is
 no longer accepted by servers running OIDC/JWT authentication, and
 `reana-client` will report a clear error if it detects one instead of a JWT.
+
+This pattern assumes your identity provider does not rotate refresh tokens for
+this client (or does not reject reuse of the last-issued one). `reana-client`
+correctly persists a replacement refresh token returned by the issuer, but only
+into that job's own local copy of the credential file — the CI secret itself is
+never updated. If your issuer rotates refresh tokens and rejects reuse (a
+supported Keycloak setting, among others), the first job to refresh invalidates
+the token for every subsequent job restoring the now-stale CI secret, which will
+then fail with `invalid_grant`; concurrent jobs can fail the same way, since
+each starts from its own copy. If your issuer does rotate refresh tokens, either
+configure a non-rotating refresh token for this CI service account if your
+provider supports it, or write the credential file back to a mutable, serialized
+secret store after each job instead of relying on an immutable CI secret.
 
 ## Useful links
 
