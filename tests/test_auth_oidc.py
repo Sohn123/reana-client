@@ -72,6 +72,11 @@ def test_credentials_are_stored_with_restrictive_permissions(tmp_path, monkeypat
         "https://reana.example.org"
     )
     assert normalize_server_url("localhost:5000/") == "https://localhost:5000"
+    # DNS hostnames are case-insensitive; two URLs differing only in host
+    # casing must normalize to the same credential-store key.
+    assert normalize_server_url("https://REANA.example.org/") == (
+        "https://reana.example.org"
+    )
     with pytest.raises(ValueError, match="must use HTTPS"):
         normalize_server_url("http://localhost:5000/")
     with pytest.raises(ValueError, match="must use HTTPS"):

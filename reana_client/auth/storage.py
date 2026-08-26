@@ -257,10 +257,14 @@ def normalize_server_url(server_url: str) -> str:
     if parsed.scheme.lower() != "https":
         raise ValueError("REANA server URL must use HTTPS")
     path = parsed.path.rstrip("/")
+    # DNS hostnames are case-insensitive; without lowercasing here, two
+    # otherwise-identical server URLs differing only in host casing (e.g.
+    # pasted from different sources) would normalize to different
+    # credential-store keys instead of being recognized as the same server.
     return urlunparse(
         (
             parsed.scheme.lower(),
-            parsed.netloc,
+            parsed.netloc.lower(),
             path,
             "",
             "",
