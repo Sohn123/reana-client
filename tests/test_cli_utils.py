@@ -237,6 +237,12 @@ def test_access_token_required_option_uses_oidc_by_default(monkeypatch):
 
 
 def test_access_token_not_required_option_allows_missing(monkeypatch):
+    monkeypatch.setattr(
+        cli_utils,
+        "get_access_token",
+        Mock(side_effect=cli_utils.AuthenticationError("not signed in")),
+    )
+
     @click.command()
     @cli_utils.add_access_token_options_not_required
     def cmd(access_token):
