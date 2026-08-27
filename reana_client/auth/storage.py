@@ -8,6 +8,7 @@
 """File-backed credential storage for REANA client."""
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -60,6 +61,22 @@ CREDENTIAL_LOCK_POLL_INTERVAL_SECONDS = 0.1
 
 class CredentialStoreError(Exception):
     """Credential persistence failure suitable for presentation by the CLI."""
+
+
+def _is_loopback_host(hostname: Optional[str]) -> bool:
+    """Return whether a hostname is localhost or a loopback IP address."""
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    if "%" in hostname:
+        # Go's net.ParseIP does not accept scoped IPv6 literals. Keep the
+        # shared credential-store policy identical across both clients.
+        return False
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def _acquire_file_lock(
@@ -254,7 +271,10 @@ def normalize_server_url(server_url: str) -> str:
     parsed = urlparse(server_url)
     if not parsed.scheme or not parsed.netloc:
         raise ValueError("REANA server URL must include scheme and host")
-    if parsed.scheme.lower() != "https":
+    scheme = parsed.scheme.lower()
+    if scheme != "https" and not (
+        scheme == "http" and _is_loopback_host(parsed.hostname)
+    ):
         raise ValueError("REANA server URL must use HTTPS")
     path = parsed.path.rstrip("/")
     # DNS hostnames are case-insensitive; without lowercasing here, two
@@ -263,7 +283,7 @@ def normalize_server_url(server_url: str) -> str:
     # credential-store keys instead of being recognized as the same server.
     return urlunparse(
         (
-            parsed.scheme.lower(),
+            scheme,
             parsed.netloc.lower(),
             path,
             "",

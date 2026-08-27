@@ -18,6 +18,7 @@ from reana_client import config
 from reana_client.auth import oidc
 from reana_client.auth import storage
 from reana_client.auth.storage import (
+    get_active_server,
     get_server_entry,
     load_config,
     normalize_server_url,
@@ -77,14 +78,58 @@ def test_credentials_are_stored_with_restrictive_permissions(tmp_path, monkeypat
     assert normalize_server_url("https://REANA.example.org/") == (
         "https://reana.example.org"
     )
-    with pytest.raises(ValueError, match="must use HTTPS"):
-        normalize_server_url("http://localhost:5000/")
+    assert normalize_server_url("http://LOCALHOST:5000/") == ("http://localhost:5000")
     with pytest.raises(ValueError, match="must use HTTPS"):
         normalize_server_url("ftp://localhost/")
     assert load_config()["active_server"] == "https://reana.example.org"
     assert get_server_entry("https://reana.example.org")["access_token"] == "access"
     assert oct(config_path.stat().st_mode & 0o777) == "0o600"
     assert oct(config_path.parent.stat().st_mode & 0o777) == "0o755"
+
+
+@pytest.mark.parametrize(
+    ("server_url", "normalized"),
+    [
+        ("http://localhost:5000/", "http://localhost:5000"),
+        ("http://127.0.0.1:5000/", "http://127.0.0.1:5000"),
+        ("http://127.42.0.1:5000/", "http://127.42.0.1:5000"),
+        ("http://[::1]:5000/", "http://[::1]:5000"),
+    ],
+)
+def test_loopback_http_server_urls_match_go_client_policy(server_url, normalized):
+    """Test shared credentials accept every loopback form allowed by Go."""
+    assert normalize_server_url(server_url) == normalized
+
+
+@pytest.mark.parametrize(
+    "server_url",
+    [
+        "http://localhost.example.org:5000",
+        "http://192.168.1.2:5000",
+        "http://reana.example.org",
+        "http://[::1%25lo]:5000",
+    ],
+)
+def test_non_loopback_http_server_urls_remain_rejected(server_url):
+    """Test HTTP remains unavailable beyond explicitly local servers."""
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        normalize_server_url(server_url)
+
+
+def test_go_loopback_credentials_can_be_loaded(tmp_path, monkeypatch):
+    """Test Python reads a loopback credential entry written by Go."""
+    config_path = tmp_path / "reana-client.json"
+    monkeypatch.setenv("REANA_CLIENT_CONFIG", str(config_path))
+    server_url = "http://127.0.0.1:5000"
+    storage.save_config(
+        {
+            "active_server": server_url,
+            "servers": {server_url: {"access_token": "go-client-token"}},
+        }
+    )
+
+    assert get_active_server() == server_url
+    assert get_server_entry(server_url)["access_token"] == "go-client-token"
 
 
 def test_default_config_directory_has_restrictive_permissions(tmp_path, monkeypatch):
