@@ -1076,6 +1076,64 @@ def test_device_flow_stores_credentials_with_pkce(tmp_path, monkeypatch):
     assert get_server_entry("https://reana.example.org")["refresh_token"] == "refresh"
 
 
+@pytest.mark.parametrize(
+    "payload,error",
+    [
+        ({"expires_in": 600}, "valid code and expiry"),
+        ({"device_code": "code", "expires_in": None}, "valid code and expiry"),
+        (
+            {"device_code": "code", "expires_in": 600, "interval": "invalid"},
+            "polling interval",
+        ),
+    ],
+)
+def test_device_flow_rejects_malformed_success_before_display(
+    monkeypatch, payload, error
+):
+    """Malformed successful device responses stay in the controlled path."""
+    monkeypatch.setattr(oidc, "discover", lambda server_url: dict(METADATA))
+    monkeypatch.setattr(oidc, "_start_device_authorization", lambda *args: payload)
+    displayed = []
+
+    with pytest.raises(oidc.AuthenticationError, match=error):
+        oidc.login_with_device_flow(
+            "https://reana.example.org",
+            displayed.append,
+            sleep=lambda interval: None,
+        )
+
+    assert displayed == []
+
+
+@pytest.mark.parametrize("payload", [None, [], "token"])
+def test_response_json_rejects_non_object_documents(payload):
+    with pytest.raises(oidc.AuthenticationError, match="not an object"):
+        oidc._response_json(MockResponse(payload))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("expires_in", None),
+        ("expires_in", "invalid"),
+        ("expires_in", -1),
+        ("refresh_expires_in", []),
+    ],
+)
+def test_store_token_response_rejects_malformed_expiry(monkeypatch, field, value):
+    token_response = {"access_token": "access", field: value}
+    monkeypatch.setattr(oidc, "upsert_server_entry", lambda *args, **kwargs: {})
+
+    if value is None:
+        # A missing/null optional expiry is valid; use a boolean to exercise
+        # the malformed-value path without conflating it with omission.
+        token_response[field] = True
+    with pytest.raises(oidc.AuthenticationError, match=field):
+        oidc._store_token_response(
+            "https://reana.example.org", dict(METADATA), token_response
+        )
+
+
 def test_device_flow_stops_at_local_expiry(monkeypatch):
     """A provider cannot keep device polling alive past ``expires_in``."""
     monkeypatch.setattr(oidc, "discover", lambda server_url: dict(METADATA))

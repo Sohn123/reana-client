@@ -148,7 +148,17 @@ def _token_expires_at(token_response: Dict) -> Optional[str]:
     """Return access token expiry timestamp from token response."""
     expires_in = token_response.get("expires_in")
     if expires_in is not None:
-        return format_timestamp(utcnow() + timedelta(seconds=int(expires_in)))
+        try:
+            if isinstance(expires_in, bool):
+                raise ValueError
+            seconds = int(expires_in)
+            if seconds < 0:
+                raise ValueError
+            return format_timestamp(utcnow() + timedelta(seconds=seconds))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise AuthenticationError(
+                "Authentication server returned an invalid 'expires_in' value."
+            ) from exc
     jwt_exp = _decode_jwt_exp(token_response.get("access_token"))
     return format_timestamp(jwt_exp) if jwt_exp else None
 
@@ -158,7 +168,45 @@ def _refresh_token_expires_at(token_response: Dict) -> Optional[str]:
     refresh_expires_in = token_response.get("refresh_expires_in")
     if refresh_expires_in is None:
         return None
-    return format_timestamp(utcnow() + timedelta(seconds=int(refresh_expires_in)))
+    try:
+        if isinstance(refresh_expires_in, bool):
+            raise ValueError
+        seconds = int(refresh_expires_in)
+        if seconds < 0:
+            raise ValueError
+        return format_timestamp(utcnow() + timedelta(seconds=seconds))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AuthenticationError(
+            "Authentication server returned an invalid 'refresh_expires_in' value."
+        ) from exc
+
+
+def _device_login_parameters(device_response: Dict) -> Tuple[str, int, int]:
+    """Validate and return device code, lifetime, and polling interval."""
+    try:
+        device_code = device_response.get("device_code")
+        if not isinstance(device_code, str) or not device_code:
+            raise ValueError
+        expires_in = device_response.get("expires_in")
+        if isinstance(expires_in, bool):
+            raise ValueError
+        expires_in = int(expires_in)
+        if expires_in <= 0:
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AuthenticationError(
+            "Device login response did not contain a valid code and expiry."
+        ) from exc
+    raw_interval = device_response.get("interval", 5)
+    try:
+        if isinstance(raw_interval, bool):
+            raise ValueError
+        interval = int(raw_interval)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AuthenticationError(
+            "Device login response contained an invalid polling interval."
+        ) from exc
+    return device_code, expires_in, interval if interval > 0 else 5
 
 
 def _reject_redirect(response: requests.Response, description: str) -> None:
@@ -183,11 +231,16 @@ def _reject_redirect(response: requests.Response, description: str) -> None:
 def _response_json(response: requests.Response) -> Dict:
     """Return JSON response or raise a readable authentication error."""
     try:
-        return response.json()
+        payload = response.json()
     except ValueError as exc:
         raise AuthenticationError(
             f"Authentication server returned a non-JSON response: {response.text}"
         ) from exc
+    if not isinstance(payload, dict):
+        raise AuthenticationError(
+            "Authentication server returned a JSON response that is not an object."
+        )
+    return payload
 
 
 def _base64url_encode(value: bytes) -> str:
@@ -257,9 +310,14 @@ def _store_token_response(
     """
     _validate_oidc_https_urls(metadata, required=("issuer", "token_endpoint"))
     access_token = token_response.get("access_token")
-    if not access_token:
+    if not isinstance(access_token, str) or not access_token:
         raise AuthenticationError(
             "Authentication server did not return an access token."
+        )
+    refresh_token = token_response.get("refresh_token")
+    if refresh_token is not None and not isinstance(refresh_token, str):
+        raise AuthenticationError(
+            "Authentication server returned an invalid refresh token."
         )
     entry = {
         "issuer": metadata["issuer"],
@@ -270,7 +328,7 @@ def _store_token_response(
         "revocation_endpoint": metadata.get("revocation_endpoint"),
         "access_token": access_token,
         "access_token_expires_at": _token_expires_at(token_response),
-        "refresh_token": token_response.get("refresh_token"),
+        "refresh_token": refresh_token,
         "refresh_token_expires_at": _refresh_token_expires_at(token_response),
     }
     return upsert_server_entry(server_url, entry, make_active=make_active)
@@ -535,16 +593,9 @@ def login_with_device_flow(
         )
     pkce = generate_pkce_pair()
     device_response = _start_device_authorization(metadata, pkce)
+    device_code, expires_in, interval = _device_login_parameters(device_response)
     display_callback(device_response)
-
-    interval = int(device_response.get("interval", 5))
-    device_code = device_response["device_code"]
-    try:
-        deadline = monotonic() + int(device_response["expires_in"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise AuthenticationError(
-            "Device login response did not contain a valid expiry."
-        ) from exc
+    deadline = monotonic() + expires_in
     while True:
         remaining = deadline - monotonic()
         if remaining <= 0:
