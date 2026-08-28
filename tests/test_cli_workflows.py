@@ -1532,6 +1532,46 @@ def test_open_interactive_session(
                 assert expected_auto_closure_message not in result.output
 
 
+def test_open_interactive_session_reports_success_when_secret_fetch_fails():
+    """A transient secret-fetch failure must not be reported as a failed open."""
+    status_code = 200
+    workflow_id = "d9304bdf-0d19-45d9-ae87-d5fd18059193"
+    response = {"path": "/{}".format(workflow_id)}
+    reana_server_url = "https://localhost"
+    env = {"REANA_SERVER_URL": reana_server_url}
+    mock_http_response, mock_response = Mock(), Mock()
+    mock_http_response.status_code = status_code
+    mock_response = response
+    reana_token = "000000"
+    runner = CliRunner(env=env)
+    with runner.isolation():
+        with patch(
+            "reana_client.api.client.current_rs_api_client",
+            make_mock_api_client("reana-server")(mock_response, mock_http_response),
+        ), patch(
+            "reana_client.api.client.info",
+            return_value={"maximum_interactive_session_inactivity_period": None},
+        ), patch(
+            "reana_client.api.client.get_interactive_session_secret",
+            side_effect=Exception("temporary error"),
+        ):
+            result = runner.invoke(
+                cli,
+                [
+                    "open",
+                    "-t",
+                    reana_token,
+                    "-w",
+                    workflow_id,
+                    INTERACTIVE_SESSION_TYPES[0],
+                ],
+            )
+            assert result.exit_code == 0
+            assert "Interactive session opened successfully" in result.output
+            assert "?token=" not in result.output
+            assert "run `reana-client open` again" in result.output
+
+
 def test_close_interactive_session():
     """Test closing an interactive session."""
     status_code = 200

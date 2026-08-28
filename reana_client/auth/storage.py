@@ -163,13 +163,25 @@ def _refresh_lock_path(server_url: str) -> str:
     return "{}.refresh.{}.lock".format(os.path.abspath(get_config_path()), server_hash)
 
 
+def _open_lock_file_safely(lock_path: str):
+    """Open (creating if needed) a lock file without following a symlink.
+
+    A predictable lock path in a shared directory would otherwise let a
+    local attacker pre-create it as a symlink, either forcing every lock
+    acquisition here to stall against an unrelated file (denial of
+    service) or making the following ``fchmod`` apply 0600 to a file the
+    attacker chose, not the intended lock file.
+    """
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "a+", encoding="utf-8")
+
+
 def _open_refresh_lock_file(server_url: str):
     lock_path = _refresh_lock_path(server_url)
     config_dir = os.path.dirname(lock_path) or "."
     os.makedirs(config_dir, mode=0o700, exist_ok=True)
-    lock_file = open(lock_path, "a+", encoding="utf-8")
-    os.chmod(lock_path, 0o600)
-    return lock_file
+    return _open_lock_file_safely(lock_path)
 
 
 def try_acquire_refresh_lock(server_url: str):
@@ -245,8 +257,7 @@ def credential_store_lock():
     os.makedirs(config_dir, mode=0o700, exist_ok=True)
     if config_path == os.path.abspath(DEFAULT_CONFIG_PATH):
         os.chmod(config_dir, 0o700)
-    lock_file = open(lock_path, "a+", encoding="utf-8")
-    os.chmod(lock_path, 0o600)
+    lock_file = _open_lock_file_safely(lock_path)
     try:
         _acquire_file_lock(lock_file)
     except BaseException:

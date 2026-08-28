@@ -8,6 +8,7 @@
 """REANA client OIDC authentication tests."""
 
 import logging
+import os
 import time
 from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
@@ -1470,3 +1471,55 @@ def test_acquire_file_lock_succeeds_after_a_bounded_wait_once_released(tmp_path)
         storage._release_file_lock(contender)
         contender.close()
         releaser.join(timeout=5)
+
+
+def test_credential_store_lock_refuses_to_follow_a_symlink(tmp_path, monkeypatch):
+    """A pre-created symlink at the lock path must not be followed.
+
+    A predictable lock path in a shared directory would otherwise let a
+    local attacker pre-create it as a symlink, forcing every lock
+    acquisition to stall against (or chmod) an unrelated file.
+    """
+    config_path = tmp_path / "reana-client.json"
+    monkeypatch.setenv("REANA_CLIENT_CONFIG", str(config_path))
+    outside_target = tmp_path / "outside-target"
+    outside_target.write_text("not a lock file")
+    lock_path = tmp_path / "reana-client.json.lock"
+    lock_path.symlink_to(outside_target)
+
+    with pytest.raises(OSError):
+        with storage.credential_store_lock():
+            pass
+
+
+def test_refresh_lock_file_refuses_to_follow_a_symlink(tmp_path, monkeypatch):
+    """The refresh lock must not follow a pre-created symlink either."""
+    config_path = tmp_path / "reana-client.json"
+    monkeypatch.setenv("REANA_CLIENT_CONFIG", str(config_path))
+    server_url = "https://reana.example.org"
+    outside_target = tmp_path / "outside-target"
+    outside_target.write_text("not a lock file")
+    lock_path = storage._refresh_lock_path(server_url)
+    os.symlink(outside_target, lock_path)
+
+    with pytest.raises(OSError):
+        storage.try_acquire_refresh_lock(server_url)
+
+
+def test_tls_verify_strict_ignores_reana_insecure(monkeypatch):
+    """REANA_INSECURE must not silently disable IdP certificate verification."""
+    monkeypatch.setenv(config.INSECURE_ENV, "true")
+    monkeypatch.delenv(config.CA_CERTS_ENV, raising=False)
+
+    assert config.tls_verify() is False
+    assert config.tls_verify_strict() is True
+
+
+def test_tls_verify_strict_still_honours_a_custom_ca_bundle(monkeypatch, tmp_path):
+    """A custom CA bundle is an explicit trust anchor, not a bypass."""
+    ca_path = tmp_path / "ca.pem"
+    ca_path.write_text("not a real certificate")
+    monkeypatch.setenv(config.CA_CERTS_ENV, str(ca_path))
+    monkeypatch.delenv(config.INSECURE_ENV, raising=False)
+
+    assert config.tls_verify_strict() == str(ca_path)

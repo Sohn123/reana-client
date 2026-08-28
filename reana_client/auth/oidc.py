@@ -34,7 +34,7 @@ from reana_client.auth.storage import (
     upsert_server_entry,
     wait_for_refresh_lock,
 )
-from reana_client.config import tls_verify
+from reana_client.config import tls_verify, tls_verify_strict
 
 DEFAULT_SCOPES = "openid profile email offline_access"
 EXPIRY_LEEWAY_SECONDS = 60
@@ -397,7 +397,7 @@ def _revoke_discarded_tokens(metadata: Dict, token_response: Dict) -> None:
             },
             timeout=30,
             allow_redirects=False,
-            verify=tls_verify(),
+            verify=tls_verify_strict(),
         )
         _reject_redirect(response, "Token revocation")
     except (AuthenticationError, requests.RequestException):
@@ -524,7 +524,7 @@ def _exchange_authorization_code(
             },
             timeout=30,
             allow_redirects=False,
-            verify=tls_verify(),
+            verify=tls_verify_strict(),
         )
     except requests.RequestException as exc:
         raise AuthenticationError(
@@ -601,7 +601,7 @@ def _start_device_authorization(metadata: Dict, pkce: Dict) -> Dict:
             },
             timeout=30,
             allow_redirects=False,
-            verify=tls_verify(),
+            verify=tls_verify_strict(),
         )
     except requests.RequestException as exc:
         raise AuthenticationError(
@@ -654,7 +654,7 @@ def login_with_device_flow(
                 },
                 timeout=max(0.1, min(30, remaining)),
                 allow_redirects=False,
-                verify=tls_verify(),
+                verify=tls_verify_strict(),
             )
         except requests.RequestException as exc:
             raise AuthenticationError(
@@ -767,7 +767,7 @@ def refresh_credentials(server_url: str, server_entry: Optional[Dict] = None) ->
                 },
                 timeout=30,
                 allow_redirects=False,
-                verify=tls_verify(),
+                verify=tls_verify_strict(),
             )
         except requests.RequestException as exc:
             raise AuthenticationError(
@@ -883,7 +883,7 @@ def logout(server_url: Optional[str] = None) -> Optional[str]:
                     },
                     timeout=30,
                     allow_redirects=False,
-                    verify=tls_verify(),
+                    verify=tls_verify_strict(),
                 )
                 _reject_redirect(response, "Token revocation")
                 if not response.ok:

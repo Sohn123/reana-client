@@ -83,6 +83,23 @@ def human_readable_or_raw_option(func):
     return wrapper
 
 
+_SENSITIVE_PARAM_NAMES = frozenset({"access_token"})
+
+
+def log_command_params(ctx: click.core.Context) -> None:
+    """Log the invoked command and its parameters at DEBUG level.
+
+    Redacts parameters known to carry a credential (currently just
+    ``access_token``) so ``-l DEBUG`` doesn't write a live OIDC JWT to
+    stderr.
+    """
+    logging.debug("command: {}".format(ctx.command_path.replace(" ", ".")))
+    for param, value in ctx.params.items():
+        if param in _SENSITIVE_PARAM_NAMES and value:
+            value = "[REDACTED]"
+        logging.debug("{param}: {value}".format(param=param, value=value))
+
+
 def _looks_like_jwt(token: str) -> bool:
     """Return whether a token has the three non-empty JWT compact segments."""
     segments = token.split(".")

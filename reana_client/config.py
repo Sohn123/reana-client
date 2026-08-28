@@ -57,6 +57,24 @@ def tls_verify() -> Union[bool, str]:
     return True
 
 
+def tls_verify_strict() -> Union[bool, str]:
+    """Return the ``verify`` value used for identity-provider HTTP requests.
+
+    Unlike :func:`tls_verify`, ``REANA_INSECURE`` is not honoured here: it is
+    documented as disabling verification for a self-signed *REANA server*
+    only, and must not also silently disable verification of the identity
+    provider's token/revocation/device-authorization endpoints.
+    ``REANA_SERVER_CA_CERTS`` still applies, since a custom CA bundle is an
+    explicit trust anchor, not a bypass, and a self-hosted deployment may
+    reasonably use the same internal CA for both the REANA server and its
+    issuer.
+    """
+    ca_certs = os.getenv(CA_CERTS_ENV)
+    if ca_certs:
+        return ca_certs
+    return True
+
+
 ERROR_MESSAGES = {
     "missing_access_token": (
         "Please run `reana-client login` to authenticate, or provide an access "

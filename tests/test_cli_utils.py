@@ -627,3 +627,20 @@ def test_follow_workflow_logs_live_logs_disabled(monkeypatch):
         "wf", "tok", interval=CLI_LOGS_FOLLOW_DEFAULT_INTERVAL, steps=[]
     )
     assert any(t == "error" and "Live logs are not enabled" in m for m, t in msgs)
+
+
+def test_log_command_params_redacts_the_access_token(caplog):
+    """-l DEBUG must not write a live access token to the log."""
+    import logging
+
+    @click.command()
+    @click.option("--access-token")
+    @click.pass_context
+    def cmd(ctx, access_token):
+        cli_utils.log_command_params(ctx)
+
+    with caplog.at_level(logging.DEBUG):
+        CliRunner().invoke(cmd, ["--access-token", "header.payload.signature"])
+
+    assert "header.payload.signature" not in caplog.text
+    assert "[REDACTED]" in caplog.text
