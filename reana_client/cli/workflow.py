@@ -1731,14 +1731,25 @@ def workflow_open_interactive_session(
             display_message(
                 "It could take several minutes to start the interactive session."
             )
-            reana_info = info(access_token)
-            max_inactivity_days_entry = (
-                reana_info.get("maximum_interactive_session_inactivity_period") or {}
-            )
-            max_inactivity_days = max_inactivity_days_entry.get("value")
-            if max_inactivity_days:
+            try:
+                reana_info = info(access_token)
+                max_inactivity_days_entry = (
+                    reana_info.get("maximum_interactive_session_inactivity_period")
+                    or {}
+                )
+                max_inactivity_days = max_inactivity_days_entry.get("value")
+                if max_inactivity_days:
+                    display_message(
+                        f"Please note that it will be automatically closed after {max_inactivity_days} days of inactivity."
+                    )
+            except Exception as info_error:
+                # The session is already open. Optional informational metadata
+                # must not turn that successful mutation into an exit failure.
+                logging.debug(traceback.format_exc())
+                logging.debug(str(info_error))
                 display_message(
-                    f"Please note that it will be automatically closed after {max_inactivity_days} days of inactivity."
+                    "Could not retrieve the interactive-session inactivity policy.",
+                    msg_type="warning",
                 )
         except Exception as e:
             logging.debug(traceback.format_exc())

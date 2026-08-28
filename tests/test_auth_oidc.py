@@ -1402,6 +1402,27 @@ def test_pkce_pair_uses_s256_challenge():
     assert pkce["code_challenge_method"] == "S256"
 
 
+def test_authorization_url_preserves_issuer_query_without_duplicate_oauth_values():
+    """Issuer hints survive while client-controlled OAuth values win."""
+    metadata = dict(METADATA)
+    metadata["authorization_endpoint"] = (
+        METADATA["authorization_endpoint"]
+        + "?kc_idp_hint=institution&client_id=issuer-default"
+    )
+
+    authorization_url = oidc._build_authorization_url(
+        metadata,
+        "openid profile",
+        {"code_challenge": "challenge", "code_challenge_method": "S256"},
+        "state",
+        "http://127.0.0.1:1234/callback",
+    )
+
+    parameters = parse_qs(urlparse(authorization_url).query)
+    assert parameters["kc_idp_hint"] == ["institution"]
+    assert parameters["client_id"] == [METADATA["reana_cli_client_id"]]
+
+
 def test_acquire_file_lock_times_out_instead_of_blocking_forever(tmp_path, caplog):
     """PR777-09: a wedged lock holder must produce a bounded, loud failure.
 
@@ -1487,9 +1508,21 @@ def test_credential_store_lock_refuses_to_follow_a_symlink(tmp_path, monkeypatch
     lock_path = tmp_path / "reana-client.json.lock"
     lock_path.symlink_to(outside_target)
 
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, storage.CredentialStoreError)):
         with storage.credential_store_lock():
             pass
+
+
+def test_lock_file_rejects_symlink_without_o_nofollow(tmp_path, monkeypatch):
+    """The post-open identity check protects platforms without O_NOFOLLOW."""
+    outside_target = tmp_path / "outside-target"
+    outside_target.write_text("not a lock file")
+    lock_path = tmp_path / "credential.lock"
+    lock_path.symlink_to(outside_target)
+    monkeypatch.delattr(storage.os, "O_NOFOLLOW", raising=False)
+
+    with pytest.raises(storage.CredentialStoreError, match="not a regular file"):
+        storage._open_lock_file_safely(str(lock_path))
 
 
 def test_refresh_lock_file_refuses_to_follow_a_symlink(tmp_path, monkeypatch):
@@ -1502,7 +1535,7 @@ def test_refresh_lock_file_refuses_to_follow_a_symlink(tmp_path, monkeypatch):
     lock_path = storage._refresh_lock_path(server_url)
     os.symlink(outside_target, lock_path)
 
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, storage.CredentialStoreError)):
         storage.try_acquire_refresh_lock(server_url)
 
 

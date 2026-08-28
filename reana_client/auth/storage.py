@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -145,8 +146,8 @@ def _try_acquire_file_lock_nb(lock_file) -> bool:
         except OSError:
             return False
     # Neither locking primitive is available: pessimistically report
-    # "already held" so callers fall back to their own refresh rather than
-    # risk two writers overlapping with no mutual exclusion at all.
+    # "already held" so callers fail after the bounded wait rather than risk
+    # two refresh-token rotations overlapping with no mutual exclusion.
     return False
 
 
@@ -172,9 +173,23 @@ def _open_lock_file_safely(lock_path: str):
     service) or making the following ``fchmod`` apply 0600 to a file the
     attacker chose, not the intended lock file.
     """
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    os.fchmod(fd, 0o600)
-    return os.fdopen(fd, "a+", encoding="utf-8")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | nofollow, 0o600)
+    try:
+        opened = os.fstat(fd)
+        current = os.lstat(lock_path)
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(opened, current):
+            raise CredentialStoreError(
+                "Credential lock path is not a regular file: {}".format(lock_path)
+            )
+        # fchmod is not available on every platform (notably Windows). The
+        # creation mode above remains the best available protection there.
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "a+", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _open_refresh_lock_file(server_url: str):
@@ -218,8 +233,7 @@ def wait_for_refresh_lock(server_url: str, timeout: float) -> bool:
     :returns: ``True`` if the lock became acquirable within ``timeout`` (the
         other refresh finished -- callers should re-read on-disk credentials
         instead of performing their own network call), or ``False`` if it
-        timed out (callers should fall back to refreshing themselves rather
-        than waiting forever).
+        timed out (callers must fail rather than rotate without the lock).
     """
     lock_file = _open_refresh_lock_file(server_url)
     try:

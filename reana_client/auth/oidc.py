@@ -17,7 +17,7 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable, Dict, Optional, Tuple
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 
@@ -41,10 +41,12 @@ EXPIRY_LEEWAY_SECONDS = 60
 DISCOVERY_PATH = "/api/.well-known/openid-configuration"
 PKCE_CODE_CHALLENGE_METHOD = "S256"
 REFRESH_LOCK_WAIT_SECONDS = 35
-"""How long to wait for another process's in-flight refresh before giving up
-and refreshing unlocked ourselves; slightly longer than the 30s network
-timeout on the refresh request itself, so a legitimate in-flight refresh
-almost always finishes (or fails) before this deadline."""
+"""How long to wait for another process's in-flight refresh before failing.
+
+This is slightly longer than the 30s network timeout on the refresh request
+itself, so a legitimate in-flight refresh almost always finishes (or fails)
+before this deadline without ever permitting an unserialised rotation.
+"""
 DEVICE_FLOW_MAX_SECONDS = 3600
 """Maximum time a device-login command may poll an issuer."""
 
@@ -408,7 +410,7 @@ def _build_authorization_url(
     metadata: Dict, scopes: str, pkce: Dict, state: str, redirect_uri: str
 ) -> str:
     """Build the OIDC authorization endpoint URL for the loopback flow."""
-    params = {
+    oauth_parameters = {
         "response_type": "code",
         "client_id": metadata["reana_cli_client_id"],
         "redirect_uri": redirect_uri,
@@ -417,7 +419,13 @@ def _build_authorization_url(
         "code_challenge": pkce["code_challenge"],
         "code_challenge_method": pkce["code_challenge_method"],
     }
-    return metadata["authorization_endpoint"] + "?" + urlencode(params)
+    endpoint = urlparse(metadata["authorization_endpoint"])
+    parameters = [
+        (key, value)
+        for key, value in parse_qsl(endpoint.query, keep_blank_values=True)
+        if key not in oauth_parameters
+    ] + list(oauth_parameters.items())
+    return urlunparse(endpoint._replace(query=urlencode(parameters)))
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):

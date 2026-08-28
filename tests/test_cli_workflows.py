@@ -1572,6 +1572,42 @@ def test_open_interactive_session_reports_success_when_secret_fetch_fails():
             assert "run `reana-client open` again" in result.output
 
 
+def test_open_interactive_session_reports_success_when_info_fetch_fails():
+    """Optional policy metadata cannot undo an already-created session."""
+    workflow_id = "d9304bdf-0d19-45d9-ae87-d5fd18059193"
+    mock_http_response = Mock(status_code=200)
+    runner = CliRunner(env={"REANA_SERVER_URL": "https://localhost"})
+    with runner.isolation(), patch(
+        "reana_client.api.client.current_rs_api_client",
+        make_mock_api_client("reana-server")(
+            {"path": f"/{workflow_id}"}, mock_http_response
+        ),
+    ), patch(
+        "reana_client.api.client.get_interactive_session_secret",
+        return_value={"session_secret": "notebook-secret"},
+    ), patch(
+        "reana_client.api.client.info", side_effect=Exception("temporary error")
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "open",
+                "-t",
+                "000000",
+                "-w",
+                workflow_id,
+                INTERACTIVE_SESSION_TYPES[0],
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert "Interactive session opened successfully" in result.output
+    assert "?token=notebook-secret" in result.output
+    assert (
+        "Could not retrieve the interactive-session inactivity policy" in result.output
+    )
+
+
 def test_close_interactive_session():
     """Test closing an interactive session."""
     status_code = 200
