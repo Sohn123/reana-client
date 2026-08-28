@@ -45,6 +45,8 @@ REFRESH_LOCK_WAIT_SECONDS = 35
 and refreshing unlocked ourselves; slightly longer than the 30s network
 timeout on the refresh request itself, so a legitimate in-flight refresh
 almost always finishes (or fails) before this deadline."""
+DEVICE_FLOW_MAX_SECONDS = 3600
+"""Maximum time a device-login command may poll an issuer."""
 
 LOOPBACK_HOST = "127.0.0.1"
 LOOPBACK_PORT_ENV = "REANA_CLIENT_LOGIN_LOOPBACK_PORT"
@@ -188,25 +190,48 @@ def _device_login_parameters(device_response: Dict) -> Tuple[str, int, int]:
         if not isinstance(device_code, str) or not device_code:
             raise ValueError
         expires_in = device_response.get("expires_in")
-        if isinstance(expires_in, bool):
+        if not isinstance(expires_in, int) or isinstance(expires_in, bool):
             raise ValueError
-        expires_in = int(expires_in)
-        if expires_in <= 0:
+        if expires_in <= 0 or expires_in > DEVICE_FLOW_MAX_SECONDS:
             raise ValueError
     except (TypeError, ValueError, OverflowError) as exc:
         raise AuthenticationError(
             "Device login response did not contain a valid code and expiry."
         ) from exc
+    complete_uri = device_response.get("verification_uri_complete")
+    verification_uri = device_response.get("verification_uri")
+    user_code = device_response.get("user_code")
+    prompt_uri = complete_uri or verification_uri
+    parsed_prompt_uri = urlparse(prompt_uri) if isinstance(prompt_uri, str) else None
+    if (
+        not parsed_prompt_uri
+        or parsed_prompt_uri.scheme != "https"
+        or not parsed_prompt_uri.netloc
+        or (
+            not complete_uri
+            and (
+                not isinstance(verification_uri, str)
+                or not verification_uri
+                or not isinstance(user_code, str)
+                or not user_code
+            )
+        )
+    ):
+        raise AuthenticationError(
+            "Device login response did not contain a usable verification prompt."
+        )
     raw_interval = device_response.get("interval", 5)
     try:
-        if isinstance(raw_interval, bool):
+        if not isinstance(raw_interval, int) or isinstance(raw_interval, bool):
             raise ValueError
-        interval = int(raw_interval)
+        interval = raw_interval
+        if interval < 0 or interval > DEVICE_FLOW_MAX_SECONDS:
+            raise ValueError
     except (TypeError, ValueError, OverflowError) as exc:
         raise AuthenticationError(
             "Device login response contained an invalid polling interval."
         ) from exc
-    return device_code, expires_in, interval if interval > 0 else 5
+    return device_code, expires_in, interval or 5
 
 
 def _reject_redirect(response: requests.Response, description: str) -> None:
@@ -309,27 +334,41 @@ def _store_token_response(
     explicit ``login`` to a different server (see ``refresh_credentials``).
     """
     _validate_oidc_https_urls(metadata, required=("issuer", "token_endpoint"))
-    access_token = token_response.get("access_token")
-    if not isinstance(access_token, str) or not access_token:
-        raise AuthenticationError(
-            "Authentication server did not return an access token."
-        )
     refresh_token = token_response.get("refresh_token")
     if refresh_token is not None and not isinstance(refresh_token, str):
         raise AuthenticationError(
             "Authentication server returned an invalid refresh token."
         )
-    entry = {
+    recovery_entry = {
         "issuer": metadata["issuer"],
         "client_id": metadata["reana_cli_client_id"],
         "token_endpoint": metadata["token_endpoint"],
         "authorization_endpoint": metadata.get("authorization_endpoint"),
         "device_authorization_endpoint": metadata.get("device_authorization_endpoint"),
         "revocation_endpoint": metadata.get("revocation_endpoint"),
-        "access_token": access_token,
-        "access_token_expires_at": _token_expires_at(token_response),
         "refresh_token": refresh_token,
-        "refresh_token_expires_at": _refresh_token_expires_at(token_response),
+    }
+    access_token = token_response.get("access_token")
+    try:
+        if not isinstance(access_token, str) or not access_token:
+            raise AuthenticationError(
+                "Authentication server did not return an access token."
+            )
+        access_token_expires_at = _token_expires_at(token_response)
+        refresh_token_expires_at = _refresh_token_expires_at(token_response)
+    except AuthenticationError:
+        if refresh_token:
+            # A rotated refresh token invalidates its predecessor even when
+            # another response field is malformed. Preserve the replacement
+            # without accepting the rejected access token, so the next command
+            # can retry instead of orphaning live issuer-side credentials.
+            upsert_server_entry(server_url, recovery_entry, make_active=make_active)
+        raise
+    entry = {
+        **recovery_entry,
+        "access_token": access_token,
+        "access_token_expires_at": access_token_expires_at,
+        "refresh_token_expires_at": refresh_token_expires_at,
     }
     return upsert_server_entry(server_url, entry, make_active=make_active)
 
@@ -420,7 +459,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
 
 def _start_callback_server() -> Tuple[HTTPServer, str]:
     """Start a loopback HTTP server and return it with its redirect URI."""
-    raw_port = os.getenv(LOOPBACK_PORT_ENV, "0")
+    raw_port = (os.getenv(LOOPBACK_PORT_ENV) or "").strip() or "0"
     try:
         requested_port = int(raw_port)
     except ValueError:
@@ -686,33 +725,38 @@ def refresh_credentials(server_url: str, server_entry: Optional[Dict] = None) ->
       different server can never flip ``active_server`` back to this one.
     """
     normalized_url = normalize_server_url(server_url)
-    with credential_store_lock():
-        # Always use the newest on-disk refresh token after acquiring the lock.
-        # Another CLI process may have rotated it while this process waited.
-        server_entry = get_server_entry(normalized_url) or server_entry or {}
-        refresh_token = server_entry.get("refresh_token")
-        if not refresh_token:
-            raise AuthenticationError("Please run `reana-client login`.")
-        _validate_oidc_https_urls(server_entry, required=("issuer", "token_endpoint"))
-        started_epoch = int(server_entry.get(CREDENTIAL_EPOCH_FIELD, 0))
-
-    refresh_lock_file = try_acquire_refresh_lock(normalized_url)
-    if refresh_lock_file is None:
-        # Another process is already refreshing this server's tokens. Wait
-        # for it to finish and reuse its result instead of racing it with
-        # our own network call. This lock is scoped to `normalized_url`, so
-        # a concurrent refresh of a *different* server never waits here.
-        if wait_for_refresh_lock(normalized_url, timeout=REFRESH_LOCK_WAIT_SECONDS):
-            with credential_store_lock():
-                waited_entry = get_server_entry(normalized_url)
-            if _access_token_valid(waited_entry):
-                return waited_entry
-        # Either the wait timed out, or the other process's refresh didn't
-        # leave a usable access token (e.g. it failed) -- fall back to an
-        # unlocked refresh of our own, same as the pre-serialization
-        # behavior; correctness still doesn't depend on this lock.
+    refresh_deadline = time.monotonic() + REFRESH_LOCK_WAIT_SECONDS
+    while True:
+        refresh_lock_file = try_acquire_refresh_lock(normalized_url)
+        if refresh_lock_file is not None:
+            break
+        remaining = refresh_deadline - time.monotonic()
+        if remaining <= 0 or not wait_for_refresh_lock(
+            normalized_url, timeout=remaining
+        ):
+            raise AuthenticationError(
+                "Timed out waiting for another credential refresh. Please retry."
+            )
+        # A successful leader leaves a usable token. After a failed leader,
+        # loop back and contend for leadership again; exactly one waiter will
+        # rotate the token while all others remain serialized.
+        with credential_store_lock():
+            waited_entry = get_server_entry(normalized_url)
+        if _access_token_valid(waited_entry):
+            return waited_entry
 
     try:
+        with credential_store_lock():
+            # Re-read only after becoming leader. A previous leader may have
+            # rotated or cleared credentials while this process waited.
+            server_entry = get_server_entry(normalized_url) or server_entry or {}
+            refresh_token = server_entry.get("refresh_token")
+            if not refresh_token:
+                raise AuthenticationError("Please run `reana-client login`.")
+            _validate_oidc_https_urls(
+                server_entry, required=("issuer", "token_endpoint")
+            )
+            started_epoch = int(server_entry.get(CREDENTIAL_EPOCH_FIELD, 0))
         try:
             response = requests.post(
                 server_entry["token_endpoint"],

@@ -650,6 +650,41 @@ def test_concurrent_refresh_reuses_winners_result_without_a_redundant_request(
     assert result["access_token"] == "winner-access"
 
 
+def test_waiter_recontends_after_failed_refresh_leader(tmp_path, monkeypatch):
+    """A failed leader releases one serialized successor, not every waiter."""
+    monkeypatch.setenv("REANA_CLIENT_CONFIG", str(tmp_path / "reana-client.json"))
+    server_url = "https://reana.example.org"
+    upsert_server_entry(
+        server_url,
+        {
+            "issuer": "https://issuer.example.org",
+            "client_id": "reana-cli",
+            "token_endpoint": "https://issuer.example.org/token",
+            "access_token": "expired-access",
+            "access_token_expires_at": "1970-01-01T00:00:01+00:00",
+            "refresh_token": "surviving-refresh",
+        },
+    )
+    leadership = iter([None, object()])
+    monkeypatch.setattr(oidc, "try_acquire_refresh_lock", lambda _url: next(leadership))
+    monkeypatch.setattr(oidc, "wait_for_refresh_lock", lambda _url, timeout: True)
+    monkeypatch.setattr(oidc, "release_refresh_lock", lambda _lock: None)
+    posts = []
+
+    def fake_post(*args, **kwargs):
+        posts.append(kwargs["data"]["refresh_token"])
+        return MockResponse(
+            {"access_token": "successor-access", "refresh_token": "successor-refresh"}
+        )
+
+    monkeypatch.setattr(oidc.requests, "post", fake_post)
+
+    result = oidc.refresh_credentials(server_url)
+
+    assert posts == ["surviving-refresh"]
+    assert result["access_token"] == "successor-access"
+
+
 def test_refresh_lock_is_reentrant_across_independent_opens(tmp_path, monkeypatch):
     """The refresh lock genuinely serialises across independent file handles.
 
@@ -984,6 +1019,17 @@ def test_start_callback_server_rejects_an_out_of_range_pinned_port(monkeypatch):
         oidc._start_callback_server()
 
 
+@pytest.mark.parametrize("value", ["", "   "])
+def test_start_callback_server_treats_empty_port_as_unset(monkeypatch, value):
+    """An empty override retains the default ephemeral-port behaviour."""
+    monkeypatch.setenv(oidc.LOOPBACK_PORT_ENV, value)
+    httpd, redirect_uri = oidc._start_callback_server()
+    try:
+        assert urlparse(redirect_uri).port > 0
+    finally:
+        httpd.server_close()
+
+
 def test_login_with_loopback_exchanges_code_with_pkce(tmp_path, monkeypatch):
     """Test the browser loopback flow exchanges the code using the verifier."""
     config_path = tmp_path / "reana-client.json"
@@ -1127,8 +1173,34 @@ def test_device_flow_stores_credentials_with_pkce(tmp_path, monkeypatch):
         ({"expires_in": 600}, "valid code and expiry"),
         ({"device_code": "code", "expires_in": None}, "valid code and expiry"),
         (
-            {"device_code": "code", "expires_in": 600, "interval": "invalid"},
+            {
+                "device_code": "code",
+                "expires_in": 600,
+                "verification_uri": "https://issuer.example.org/device",
+                "user_code": "1234",
+                "interval": "invalid",
+            },
             "polling interval",
+        ),
+        (
+            {"device_code": "code", "expires_in": 600},
+            "usable verification prompt",
+        ),
+        (
+            {
+                "device_code": "code",
+                "expires_in": 600,
+                "verification_uri": "https://issuer.example.org/device",
+            },
+            "usable verification prompt",
+        ),
+        (
+            {
+                "device_code": "code",
+                "expires_in": oidc.DEVICE_FLOW_MAX_SECONDS + 1,
+                "verification_uri_complete": "https://issuer.example.org/device",
+            },
+            "valid code and expiry",
         ),
     ],
 )
@@ -1177,6 +1249,31 @@ def test_store_token_response_rejects_malformed_expiry(monkeypatch, field, value
         oidc._store_token_response(
             "https://reana.example.org", dict(METADATA), token_response
         )
+
+
+def test_store_token_response_preserves_rotated_refresh_token_on_rejection(
+    tmp_path, monkeypatch
+):
+    """A malformed response must not orphan its already-rotated refresh token."""
+    monkeypatch.setenv("REANA_CLIENT_CONFIG", str(tmp_path / "credentials.json"))
+    server_url = "https://reana.example.org"
+    upsert_server_entry(server_url, {"refresh_token": "old-refresh"})
+
+    with pytest.raises(oidc.AuthenticationError, match="expires_in"):
+        oidc._store_token_response(
+            server_url,
+            dict(METADATA),
+            {
+                "access_token": "rejected-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": True,
+            },
+            make_active=False,
+        )
+
+    entry = get_server_entry(server_url)
+    assert entry["refresh_token"] == "rotated-refresh"
+    assert entry.get("access_token") != "rejected-access"
 
 
 def test_device_flow_stops_at_local_expiry(monkeypatch):
